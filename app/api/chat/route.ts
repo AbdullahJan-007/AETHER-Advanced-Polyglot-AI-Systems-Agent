@@ -166,6 +166,14 @@ export async function POST(req: NextRequest) {
     SECURITY_LIMITS.GENERATION_TIMEOUT_MS
   );
 
+  // Security headers are defined here (outside try) so the catch block can also reference them.
+  const securityHeaders = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "clipboard-write=(self)",
+  };
+
   try {
     const body: ChatRequest = await req.json();
 
@@ -259,13 +267,6 @@ export async function POST(req: NextRequest) {
     const wantsStream = req.headers.get("accept")?.includes("text/event-stream") || true;
 
     // Security headers on every response (maintain high security)
-    const securityHeaders = {
-      "X-Content-Type-Options": "nosniff",
-      "X-Frame-Options": "DENY",
-      "Referrer-Policy": "strict-origin-when-cross-origin",
-      "Permissions-Policy": "clipboard-write=(self)",
-    };
-
     if (provider === "groq" && wantsStream) {
       const groqBody = {
         model: model || "llama-3.3-70b-versatile",

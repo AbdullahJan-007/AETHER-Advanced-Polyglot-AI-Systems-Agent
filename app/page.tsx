@@ -125,6 +125,14 @@ export default function AetherAgent() {
     return [...workspaceFiles].sort((a, b) => a.path.localeCompare(b.path));
   }, [workspaceFiles]);
 
+  // Live workspace size (used in header badge + export button + mobile sheet)
+  // Matches the "1.5 MB warning" and quota UX described in the project docs.
+  const workspaceSizeMB = useMemo(() => {
+    if (!workspaceFiles?.length) return 0;
+    const totalBytes = workspaceFiles.reduce((acc, f) => acc + (f.content?.length || 0), 0);
+    return totalBytes / (1024 * 1024);
+  }, [workspaceFiles]);
+
   // Auto scroll chat
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -688,7 +696,8 @@ ${messages.slice(0, 30).map(m => `${m.role.toUpperCase()}: ${m.content.slice(0, 
   ) : null;
 
   return (
-    <div className="flex h-dvh lg:h-screen aether-container overflow-hidden text-sm touch-manipulation">
+    <>
+      <div className="flex h-dvh lg:h-screen aether-container overflow-hidden text-sm touch-manipulation">
       {MobileDrawerBackdrop}
 
       {/* LEFT — Command & Context (desktop column | mobile slide-in drawer) */}
@@ -1172,6 +1181,6 @@ ${messages.slice(0, 30).map(m => `${m.role.toUpperCase()}: ${m.content.slice(0, 
           )}
         </div>
       )}
-    </div>
+  </>
   );
 }
