@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback, useMemo } from "react";
-import { Send, Paperclip, Brain, Bug, FolderTree, Download, Copy, RefreshCw, X, Play, Settings, Zap, AlertTriangle, Menu } from "lucide-react";
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react";
+import { createPortal } from "react-dom";
+import { Send, Paperclip, Brain, Bug, FolderTree, Download, Copy, RefreshCw, X, Play, Settings, Zap, AlertTriangle, Menu, ChevronDown, Image, FileText } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
@@ -68,18 +69,385 @@ const QUICK_TEMPLATES = [
   "Flutter + Rust Axum backend + TS web admin. Full type-safe contracts across all three.",
 ];
 
+// Accept filters for the modern attach menu (Photo vs Document)
+const PHOTO_ACCEPT = "image/*,.heic,.heif"; // all common photo/image formats
+const DOC_ACCEPT = ".txt,.md,.markdown,.pdf,.doc,.docx,.xls,.xlsx,.csv,.json,.yaml,.yml,.toml,.xml,.html,.css,.scss,.js,.ts,.tsx,.jsx,.py,.go,.rs,.dart,.sql,.prisma,.env,.ini,.cfg,.log,.zip,.tar,.gz,.lock,.sum"; // any document, code, text, office, archive
+
+/** Advanced modern tech ChoiceSelect with React Portal.
+ *  The menu is rendered via createPortal directly to document.body.
+ *  This completely isolates the dropdown from the nav/chat tree,
+ *  so clicking the controls no longer causes layout/paint thrash or blinking
+ *  of the golden watermark in the chat background.
+ *
+ *  Full list of options is always rendered. Current selection has the left accent + cyan dot.
+ */
+function ChoiceSelect<T extends string>({
+  label,
+  value,
+  onChange,
+  options,
+  placeholder = "Select...",
+}: {
+  label: string;
+  value: T | "";
+  onChange: (val: T) => void;
+  options: { value: T; label: string }[];
+  placeholder?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number; minWidth: number } | null>(null);
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Close on outside click — but NEVER treat clicks inside the portaled menu as "outside".
+  // This was the cause of selections not sticking: mousedown on a menu item would close the menu
+  // (via the document listener) before or during the item's onClick, so onChange sometimes appeared to do nothing
+  // and the displayed value stayed on the old choice (Groq, Chat, etc.).
+  useEffect(() => {
+    if (!open) return;
+
+    const onDocClick = (e: MouseEvent) => {
+      const target = e.target as Node;
+      const insideTrigger = !!containerRef.current?.contains(target);
+      const insideMenu = !!menuRef.current?.contains(target);
+      if (insideTrigger || insideMenu) {
+        // Click was on the trigger or inside the open dropdown menu (even though portaled).
+        // Do not close; let the menu item onClick (if any) handle selection + explicit close.
+        return;
+      }
+      setOpen(false);
+      setMenuPos(null);
+    };
+
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [open]);
+
+  // Measure trigger and open the menu (using viewport coords for fixed positioning)
+  const toggle = () => {
+    if (open) {
+      setOpen(false);
+      setMenuPos(null);
+      return;
+    }
+
+    // Measure before setting open so we have the position ready
+    if (triggerRef.current) {
+      const rect = triggerRef.current.getBoundingClientRect();
+      setMenuPos({
+        top: rect.bottom + 6,
+        left: rect.left,
+        minWidth: Math.max(rect.width + 20, 200),
+      });
+    }
+    setOpen(true);
+  };
+
+  const current = options.find((o) => o.value === value);
+  const display = current ? current.label : placeholder;
+
+  // The actual menu content (full list, always rendered when open).
+  // We attach menuRef so the outside-click guard can see clicks inside the portal.
+  const MenuList = (
+    <div
+      ref={menuRef}
+      className="overflow-hidden rounded-2xl border border-[#252932] bg-[#0b0d14] shadow-[0_12px_48px_-12px_rgb(0,0,0,0.65)] py-1 flex flex-col"
+      style={{
+        position: "fixed",
+        top: menuPos?.top ?? 0,
+        left: menuPos?.left ?? 0,
+        minWidth: menuPos?.minWidth ?? 200,
+        zIndex: 999999,
+      }}
+      role="listbox"
+      onMouseDown={(e) => {
+        // Extra safety: stop the native mousedown from reaching the document listener at all.
+        // Combined with the ref.contains check above, clicks on options are guaranteed to reach their onClick.
+        e.stopPropagation();
+      }}
+    >
+      {options.map((opt) => {
+        const isActive = opt.value === value;
+        return (
+          <button
+            key={String(opt.value)}
+            type="button"
+            onClick={() => {
+              onChange(opt.value);
+              setOpen(false);
+              setMenuPos(null);
+            }}
+            className={`group w-full text-left px-3.5 py-[6px] text-sm transition flex items-center gap-3
+              ${isActive
+                ? "bg-[#161a22] text-white"
+                : "text-[#d1d5db] hover:bg-[#161a22] hover:text-white"}`}
+            role="option"
+            aria-selected={isActive}
+          >
+            <div className={`h-4 w-[3px] rounded-full flex-shrink-0 transition ${isActive ? "bg-[#6366f1]" : "bg-white/10 group-hover:bg-white/25"}`} />
+            <span className={`${isActive ? "font-medium" : ""}`}>{opt.label}</span>
+            {isActive && <div className="ml-auto h-1.5 w-1.5 rounded-full bg-[#22d3ee]" />}
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  return (
+    <div className="flex items-center gap-2 relative" ref={containerRef}>
+      <div className="text-[10px] uppercase tracking-[1.5px] text-[#5f6674] font-medium shrink-0">{label}</div>
+
+      <div className="relative">
+        <button
+          ref={triggerRef}
+          type="button"
+          onClick={toggle}
+          className="group flex h-9 min-w-[118px] items-center justify-between gap-2 rounded-[18px] border border-[#252932] bg-[#0c0e14] px-3 text-sm text-left transition-all hover:border-[#353a46] focus:outline-none focus-visible:border-[#6366f1]/60 active:scale-[0.985]"
+          aria-haspopup="listbox"
+          aria-expanded={open}
+        >
+          <span className="truncate text-[#c9ccd3] group-hover:text-white">{display}</span>
+          <ChevronDown size={15} className={`text-[#8b919d] transition-transform ${open ? "rotate-180" : ""}`} />
+        </button>
+
+        {/* Portaled menu — lives in document.body so it can never be clipped by the chat area
+            and does not cause re-paint side effects on the golden watermark when opening/closing. */}
+        {open && menuPos && createPortal(MenuList, document.body)}
+      </div>
+    </div>
+  );
+}
+
+// Memoized so the expensive dropdown buttons don't re-render on every streaming token / parent update.
+const MemoizedChoiceSelect = memo(ChoiceSelect) as typeof ChoiceSelect;
+
+/** Extremely cheap golden watermark.
+ *  Previously this giant rotated bg-clip-text was inside the updating chat tree and caused
+ *  noticeable jank/lag on every token during "loading". Now it's a pure memoized leaf
+ *  with aggressive GPU/compositor hints and content-visibility so the browser can ignore it
+ *  while the live response bubble is updating.
+ */
+const Watermark = memo(function Watermark() {
+  return (
+    <div
+      className="absolute inset-0 flex items-center justify-center pointer-events-none select-none z-0 overflow-hidden"
+      style={{
+        transform: 'translateZ(0)',
+        willChange: 'transform, opacity',
+        backfaceVisibility: 'hidden',
+        contentVisibility: 'auto' as any,
+      }}
+    >
+      <div
+        className="flex flex-col items-center opacity-[0.045]"
+        style={{ transform: 'rotate(-6.5deg) translateZ(0)' }}
+      >
+        {/* Reduced max sizes — still very visible as a subtle brand watermark but far cheaper to paint */}
+        <div className="text-[48px] sm:text-[58px] md:text-[66px] lg:text-[72px] font-semibold tracking-[-4.5px] leading-[0.78] bg-gradient-to-br from-[#facc15] via-[#fbbf24] to-[#b45309] bg-clip-text text-transparent">
+          AETHER
+        </div>
+        <div className="text-[13px] sm:text-[15px] md:text-[17px] lg:text-[19px] font-medium tracking-[2.8px] -mt-1 bg-gradient-to-br from-[#facc15] via-[#fbbf24] to-[#b45309] bg-clip-text text-transparent">
+          Advanced Polyglot AI Agent
+        </div>
+      </div>
+    </div>
+  );
+});
+
+/** Fast path for code blocks during historical render.
+ *  Memoized on the raw code + filePath so we don't re-parse or re-create buttons on parent re-renders.
+ */
+const MemoizedCodeBlock = memo(function MemoizedCodeBlock({
+  lang,
+  filePath,
+  code,
+  onCopy,
+  onToWorkspace,
+  onRefine,
+}: {
+  lang: string;
+  filePath: string;
+  code: string;
+  onCopy: (text: string, label?: string) => void;
+  onToWorkspace: (path: string, content: string, lang: string) => void;
+  onRefine: (file: { path: string; content: string; lang: string }) => void;
+}) {
+  return (
+    <div className="my-3 rounded-xl overflow-hidden border border-[#252932] bg-[#0d0f14]">
+      <div className="code-header flex items-center justify-between px-3 py-1.5 text-[#8b919d]">
+        <div className="flex items-center gap-2 font-mono text-[10px] tracking-[0.5px]">
+          {filePath || lang}
+        </div>
+        <div className="flex gap-1.5">
+          <button
+            onClick={() => onCopy(code, "code")}
+            className="inline-flex items-center gap-1 rounded px-2 py-0.5 hover:bg-[#1f242d] transition text-[10px]"
+          >
+            <Copy size={12} /> COPY
+          </button>
+          {filePath && (
+            <button
+              onClick={() => onToWorkspace(filePath, code, lang)}
+              className="inline-flex items-center gap-1 rounded px-2 py-0.5 hover:bg-[#1f242d] transition text-[10px] text-[#22d3ee]"
+            >
+              <FolderTree size={12} /> TO WORKSPACE
+            </button>
+          )}
+          {filePath && (
+            <button
+              onClick={() => onRefine({ path: filePath, content: code, lang })}
+              className="inline-flex items-center gap-1 rounded px-2 py-0.5 hover:bg-[#1f242d] transition text-[10px] text-[#f472b6]"
+            >
+              <RefreshCw size={12} /> REFINE
+            </button>
+          )}
+        </div>
+      </div>
+      <pre className="code-block p-4 text-[12.5px] leading-[1.45] overflow-auto text-[#c9d0dc]"><code>{code}</code></pre>
+    </div>
+  );
+});
+
+/** Memoized rich message renderer for a single assistant historical message.
+ *  The expensive regex + React tree for code blocks + action buttons only runs when THIS message's content actually changes.
+ */
+const RichMessage = memo(function RichMessage({
+  content,
+  onCopy,
+  onToWorkspace,
+  onRefine,
+}: {
+  content: string;
+  onCopy: (text: string, label?: string) => void;
+  onToWorkspace: (path: string, content: string, lang: string) => void;
+  onRefine: (file: { path: string; content: string; lang: string }) => void;
+}) {
+  const parts: React.ReactNode[] = [];
+  const codeRegex = /```([\w-]+)?(?::([^\n]+))?\n([\s\S]*?)```/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let key = 0;
+
+  while ((m = codeRegex.exec(content)) !== null) {
+    if (m.index > last) {
+      parts.push(<div key={key++} className="whitespace-pre-wrap text-[13px] leading-relaxed text-[#c9ccd3]">{content.slice(last, m.index)}</div>);
+    }
+    const lang = (m[1] || "text").trim();
+    const filePath = (m[2] || "").trim();
+    const code = m[3].trim();
+
+    parts.push(
+      <MemoizedCodeBlock
+        key={key++}
+        lang={lang}
+        filePath={filePath}
+        code={code}
+        onCopy={onCopy}
+        onToWorkspace={onToWorkspace}
+        onRefine={onRefine}
+      />
+    );
+    last = m.index + m[0].length;
+  }
+  if (last < content.length) {
+    parts.push(<div key={key++} className="whitespace-pre-wrap text-[13px] leading-relaxed text-[#c9ccd3]">{content.slice(last)}</div>);
+  }
+  return <div className="space-y-1 text-[13px]">{parts}</div>;
+});
+
+/** One chat row (user or assistant). Memoized so that when the parent re-renders for streaming tokens,
+ *  input typing, showThinking toggle, plan checkbox elsewhere, etc., rows whose props are referentially equal bail out completely.
+ */
+const ChatMessage = memo(function ChatMessage({
+  msg,
+  idx,
+  showThinking,
+  planSteps,
+  onTogglePlanStep,
+  onCopy,
+  onToWorkspace,
+  onRefine,
+}: {
+  msg: Message;
+  idx: number;
+  showThinking: boolean;
+  planSteps: PlanStep[];
+  onTogglePlanStep: (id: number) => void;
+  onCopy: (text: string, label?: string) => void;
+  onToWorkspace: (path: string, content: string, lang: string) => void;
+  onRefine: (file: { path: string; content: string; lang: string }) => void;
+}) {
+  const isAssistant = msg.role === "assistant";
+  const hideAvatar = isAssistant && idx === 0; // welcome message has no A badge
+
+  return (
+    <div className={`flex gap-3 ${msg.role === "user" ? "justify-end" : ""}`}>
+      {isAssistant && !hideAvatar && (
+        <div className="w-7 h-7 mt-0.5 rounded-md bg-gradient-to-br from-[#6366f1] to-[#22d3ee] text-[10px] font-bold flex items-center justify-center text-black shrink-0">A</div>
+      )}
+
+      <div className={`max-w-[82%] rounded-2xl px-4 py-3.5 text-[13px] ${msg.role === "user" ? "message-user rounded-br-md" : "message-assistant rounded-bl-md"}`}>
+        {isAssistant ? (
+          <>
+            <RichMessage content={msg.content} onCopy={onCopy} onToWorkspace={onToWorkspace} onRefine={onRefine} />
+
+            {showThinking && msg.thinking && (
+              <details className="thinking-block mt-4 pl-3 pr-2 py-2 rounded text-xs text-[#a1a6b0] cursor-pointer" open>
+                <summary className="font-medium text-[#6366f1] select-none">AETHER Thinking (first principles + critique)</summary>
+                <div className="mt-2 whitespace-pre-wrap leading-relaxed">{msg.thinking}</div>
+              </details>
+            )}
+
+            {msg.plan && (
+              <div className="mt-4 border border-[#252932] rounded-xl p-3 bg-[#0a0b0f]">
+                <div className="uppercase tracking-widest text-[10px] text-[#6366f1] mb-2">EXECUTION PLAN — check progress</div>
+                {planSteps.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {planSteps.map((step) => (
+                      <label key={step.id} className={`plan-step flex items-start gap-2 text-xs cursor-pointer ${step.completed ? "completed" : ""}`}>
+                        <input type="checkbox" checked={step.completed} onChange={() => onTogglePlanStep(step.id)} className="mt-0.5 accent-[#6366f1]" />
+                        <span>{step.text}</span>
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-[#8b919d] text-xs whitespace-pre-wrap">{msg.plan}</div>
+                )}
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="whitespace-pre-wrap">{msg.content}</div>
+        )}
+      </div>
+
+      {msg.role === "user" && (
+        <div className="w-7 h-7 mt-0.5 rounded-md bg-[#252932] text-[10px] font-bold flex items-center justify-center shrink-0">ME</div>
+      )}
+    </div>
+  );
+});
+
 export default function AetherAgent() {
   // Core chat state
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
-      content: "# Welcome to AETHER\n\nI am a hyper-intelligent 2026 polyglot systems architect.\n\nI use elite first-principles reasoning, produce complete production-grade vertical slices, and always select the most advanced correct tools for the job.\n\n**Supported at expert level:**\n- Next.js 16 / React 19 full-stack (RSC, Server Actions, streaming)\n- Flutter + Riverpod + go_router + modern persistence\n- FastAPI / Go / Rust industrial backends\n- Complete projects with tests, Docker, CI, observability, security\n\nChoose a mode, lock a stack (or leave Universal), enable Deep Think for reflection, then describe your goal or paste errors/logs.",
+      content: "I'm AETHER\n\nWhat would you like to build today?",
     },
   ]);
 
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+
+  // === STREAMING OPTIMIZATION: keep live token accumulation OUTSIDE the messages array ===
+  // Historical messages stay completely stable (no re-renders) while the model is emitting tokens.
+  // Only this one "live" bubble updates during generation → dramatically less jank/lag.
+  const [streamingContent, setStreamingContent] = useState("");
+  const [streamingThinking, setStreamingThinking] = useState<string | undefined>(undefined);
 
   // Powerful controls
   const [provider, setProvider] = useState<Provider>("groq");
@@ -99,13 +467,17 @@ export default function AetherAgent() {
 
   // Refs
   const bottomRef = useRef<HTMLDivElement>(null);
+  const chatScrollerRef = useRef<HTMLDivElement>(null); // the actual overflow-y-auto viewport — for instant bottom-pinning during streaming (critical for no "up and down" jitter)
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null); // for cancel + reliability
+  const attachMenuRef = useRef<HTMLDivElement>(null); // for photo/doc attach menu outside-click handling
+  const streamRafRef = useRef<number>(0); // for cancelling any pending rAF during streaming so we don't setState after unmount/cancel
 
   // Responsive / device adaptive state (makes view auto-adjust for phones, tablets, desktops, large screens)
   const [isMobile, setIsMobile] = useState(false);
   const [sidebarDrawerOpen, setSidebarDrawerOpen] = useState(false); // mobile only slide-out for command pane
+  const [showAttachMenu, setShowAttachMenu] = useState(false); // photo vs document chooser for the add-file button
   // workspaceOpen is reused: on mobile it triggers the workspace bottom-sheet/full modal instead of side pane
 
   useEffect(() => {
@@ -114,6 +486,18 @@ export default function AetherAgent() {
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
   }, []);
+
+  // Close the Photo/Doc attach menu when clicking outside
+  useEffect(() => {
+    if (!showAttachMenu) return;
+    const onOutside = (e: MouseEvent) => {
+      if (attachMenuRef.current && !attachMenuRef.current.contains(e.target as Node)) {
+        setShowAttachMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", onOutside);
+    return () => document.removeEventListener("mousedown", onOutside);
+  }, [showAttachMenu]);
 
   // Derived
   const activeFile = useMemo(
@@ -133,10 +517,34 @@ export default function AetherAgent() {
     return totalBytes / (1024 * 1024);
   }, [workspaceFiles]);
 
-  // Auto scroll chat
+  // Auto-scroll for chat.
+  // CRITICAL for "loading ke waqt up and down" fix:
+  // - While the model is actively streaming (loading || streamingContent), we do DIRECT instant
+  //   scrollTop assignment on the real scroller. No smooth animation. Smooth + rapid content growth
+  //   + status row appearing is what causes the visible bounce/jitter in one place.
+  // - Only after a full turn is committed (messages array changed, streaming over) we do a pleasant smooth scroll.
+  // We also guard with the scroller ref so we can manipulate the viewport directly.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, loading]);
+    const scroller = chatScrollerRef.current;
+    const isActivelyStreaming = !!(loading || streamingContent);
+
+    if (isActivelyStreaming && scroller) {
+      // Instant pin — no animation fighting the live text growth. This stops the "up and down".
+      // We use scrollHeight directly; it's the cheapest and most reliable way to stay at bottom.
+      scroller.scrollTop = scroller.scrollHeight;
+    } else if (!isActivelyStreaming) {
+      // Nice smooth only between complete turns.
+      bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  }, [messages, loading, streamingContent]);
+
+  // Stable status label for the live streaming bubble (avoids re-computing the long ternary on every token flush)
+  const liveStatus = useMemo(() => {
+    if (mode === "plan") return "Architecting phases";
+    if (mode === "debug") return "Isolating root cause";
+    if (deepThink) return "Deep critique pass";
+    return "Generating production artifacts";
+  }, [mode, deepThink]);
 
   // Persist workspace safely (versioned, corruption-proof) — critical for reliability
   const WORKSPACE_STORAGE_KEY = "aether_workspace_v2";
@@ -312,6 +720,14 @@ export default function AetherAgent() {
     setInput("");
     setLoading(true);
 
+    // Reset any previous streaming state + pending rAF before a new generation starts
+    if (streamRafRef.current) {
+      cancelAnimationFrame(streamRafRef.current);
+      streamRafRef.current = 0;
+    }
+    setStreamingContent("");
+    setStreamingThinking(undefined);
+
     const payload = {
       messages: updatedMessages,
       provider,
@@ -345,7 +761,36 @@ export default function AetherAgent() {
         const decoder = new TextDecoder();
         let buffer = "";
 
-        setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+        // IMPORTANT: Do NOT append to messages here. We use dedicated streaming state
+        // so that the entire previous conversation + historical bubbles are 100% stable
+        // and do not re-render or re-run rich parsing on every token.
+        setStreamingContent("");
+        setStreamingThinking(undefined);
+
+        // === RAFT + SAFETY THROTTLE for ultra-smooth streaming on fast providers (Groq etc) ===
+        // We batch visual updates to rAF (screen refresh) so the browser can coalesce paints.
+        // We also keep a hard safety flush every ~80ms so the user always sees progress even on very bursty streams.
+        let pending = "";
+        let lastSafetyFlush = Date.now();
+        const SAFETY_MS = 80;
+
+        const flush = () => {
+          streamRafRef.current = 0;
+          setStreamingContent(pending);
+          lastSafetyFlush = Date.now();
+        };
+
+        const scheduleFlush = (force = false) => {
+          const now = Date.now();
+          if (force || now - lastSafetyFlush > SAFETY_MS) {
+            if (streamRafRef.current) cancelAnimationFrame(streamRafRef.current);
+            flush();
+            return;
+          }
+          if (!streamRafRef.current) {
+            streamRafRef.current = requestAnimationFrame(flush);
+          }
+        };
 
         while (true) {
           const { done, value } = await reader.read();
@@ -365,14 +810,8 @@ export default function AetherAgent() {
                 const delta: string = json.delta || "";
                 if (delta) {
                   assistantContent += delta;
-                  setMessages((prev) => {
-                    const copy = [...prev];
-                    const last = copy[copy.length - 1];
-                    if (last && last.role === "assistant") {
-                      last.content = assistantContent;
-                    }
-                    return copy;
-                  });
+                  pending = assistantContent;
+                  scheduleFlush();
                 }
               } catch (e: any) {
                 if (e.message) throw e;
@@ -380,24 +819,39 @@ export default function AetherAgent() {
             }
           }
         }
+
+        // Final hard commit of whatever we have (guarantees the last tokens appear even if rAF was pending)
+        if (streamRafRef.current) {
+          cancelAnimationFrame(streamRafRef.current);
+          streamRafRef.current = 0;
+        }
+        if (assistantContent) {
+          setStreamingContent(assistantContent);
+        }
       } else {
         const data = await res.json();
         assistantContent = data.message || "No response";
-        setMessages((prev) => [...prev, { role: "assistant", content: assistantContent }]);
+        // Non-streaming path: commit directly (rare now)
+        setStreamingContent(assistantContent);
       }
 
       const parsed = parseAssistantResponse(assistantContent);
 
-      setMessages((prev) => {
-        const copy = [...prev];
-        const last = copy[copy.length - 1];
-        if (last && last.role === "assistant") {
-          last.content = parsed.clean || assistantContent;
-          if (parsed.thinking) last.thinking = parsed.thinking;
-          if (parsed.plan) last.plan = parsed.plan;
-        }
-        return copy;
-      });
+      // Final single commit of the completed assistant turn into the stable messages list.
+      // After this, streaming* states are cleared so the live bubble disappears and the
+      // rich (code blocks, thinking, plan) version appears in the historical list.
+      const finalAssistant: Message = {
+        role: "assistant",
+        content: parsed.clean || assistantContent,
+        ...(parsed.thinking ? { thinking: parsed.thinking } : {}),
+        ...(parsed.plan ? { plan: parsed.plan } : {}),
+      };
+
+      setMessages((prev) => [...prev, finalAssistant]);
+
+      // Clear the live streaming UI state so only the committed historical message remains.
+      setStreamingContent("");
+      setStreamingThinking(undefined);
 
       if (parsed.files.length) {
         mergeNewFiles(parsed.files);
@@ -407,6 +861,7 @@ export default function AetherAgent() {
       }
     } catch (e: any) {
       const errorMsg = e?.message || "Unknown engine error";
+      // On hard error we still want to show something in history and stop the live bubble
       setMessages((prev) => [
         ...prev,
         {
@@ -414,11 +869,21 @@ export default function AetherAgent() {
           content: `**Engine error**\n\n${errorMsg}\n\nTip: Check .env keys, try switching provider, or reduce attached file size.`,
         },
       ]);
+      setStreamingContent("");
+      setStreamingThinking(undefined);
       toast.error("AETHER encountered an issue", { description: errorMsg });
     } finally {
+      if (streamRafRef.current) {
+        cancelAnimationFrame(streamRafRef.current);
+        streamRafRef.current = 0;
+      }
       setLoading(false);
       setAttachedFiles([]);
       abortControllerRef.current = null;
+
+      // Always clear any residual streaming UI state
+      setStreamingContent("");
+      setStreamingThinking(undefined);
     }
   }, [input, attachedFiles, loading, messages, provider, mode, stack, deepThink]);
 
@@ -426,9 +891,15 @@ export default function AetherAgent() {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
-      setLoading(false);
-      toast.info("Generation cancelled by user");
     }
+    if (streamRafRef.current) {
+      cancelAnimationFrame(streamRafRef.current);
+      streamRafRef.current = 0;
+    }
+    setLoading(false);
+    setStreamingContent("");
+    setStreamingThinking(undefined);
+    toast.info("Generation cancelled by user");
   }, []);
 
   // Long conversation helper - keeps context lean & efficient (non-destructive)
@@ -510,9 +981,24 @@ ${messages.slice(0, 30).map(m => `${m.role.toUpperCase()}: ${m.content.slice(0, 
     const f = e.target.files?.[0];
     if (!f) return;
 
-    const allowed = /\.(txt|md|ts|tsx|js|jsx|json|css|html|py|dart|go|rs|yml|yaml|env|sql|prisma|lock)$/i;
-    if (!allowed.test(f.name) && f.size > 180 * 1024) {
-      toast.warning("Large binary or image skipped", { description: "Attach source, logs, or small configs for best results" });
+    const isImage = /^image\//.test(f.type) || /\.(png|jpe?g|gif|webp|svg|heic|heif|bmp|ico)$/i.test(f.name);
+
+    // For images we accept them (user picked via Photo option) but we don't send raw pixels as text.
+    // We attach a lightweight note so the model knows a visual was provided.
+    if (isImage) {
+      const sizeKB = Math.round(f.size / 1024);
+      const note = `[IMAGE ATTACHED: ${f.name} — ${sizeKB} KB photo/screenshot. The user uploaded a visual. Ask for analysis or describe what you need from it.]`;
+      const newAttach: AttachedFile = { name: f.name, content: note };
+      setAttachedFiles((prev) => [...prev, newAttach]);
+      toast.success(`Attached photo: ${f.name}`, { description: "Image noted for context (filename + size). For pixel-level vision, use a vision-capable provider." });
+      e.target.value = "";
+      return;
+    }
+
+    // Documents / code / text files — existing flow
+    const allowed = /\.(txt|md|ts|tsx|js|jsx|json|css|html|py|dart|go|rs|yml|yaml|env|sql|prisma|lock|pdf|docx?|xlsx?|csv|toml|xml|zip|tar|gz)$/i;
+    if (!allowed.test(f.name) && f.size > 200 * 1024) {
+      toast.warning("Large binary skipped", { description: "Prefer source, configs, logs, small PDFs or docs." });
       e.target.value = "";
       return;
     }
@@ -520,7 +1006,6 @@ ${messages.slice(0, 30).map(m => `${m.role.toUpperCase()}: ${m.content.slice(0, 
     const text = await f.text();
     const newAttach: AttachedFile = { name: f.name, content: text.slice(0, 48000) };
 
-    // Immediate client-side secret warning before it even gets sent
     const attachWarn = scanForSecrets(newAttach.content, `attach:${f.name}`);
     if (attachWarn.length) {
       toast.warning("Caution: file may contain secrets", { description: attachWarn[0] + " — will be wrapped as untrusted data." });
@@ -531,16 +1016,25 @@ ${messages.slice(0, 30).map(m => `${m.role.toUpperCase()}: ${m.content.slice(0, 
     e.target.value = "";
   };
 
-  const removeAttached = (name: string) => {
-    setAttachedFiles((prev) => prev.filter((a) => a.name !== name));
-  };
+  // Opens the OS file picker filtered for the chosen category (Photo or Document)
+  const openAttachPicker = useCallback((accept: string) => {
+    if (fileInputRef.current) {
+      fileInputRef.current.accept = accept;
+      fileInputRef.current.click();
+    }
+    setShowAttachMenu(false);
+  }, []);
 
-  const copyToClipboard = async (text: string, label = "content") => {
+  const removeAttached = useCallback((name: string) => {
+    setAttachedFiles((prev) => prev.filter((a) => a.name !== name));
+  }, []);
+
+  const copyToClipboard = useCallback(async (text: string, label = "content") => {
     await navigator.clipboard.writeText(text);
     toast.success(`Copied ${label}`);
-  };
+  }, []);
 
-  const loadFileToWorkspace = (path: string, content: string, lang: string) => {
+  const loadFileToWorkspace = useCallback((path: string, content: string, lang: string) => {
     setWorkspaceFiles((prev) => {
       const idx = prev.findIndex((f) => f.path === path);
       const nf = { path, content, lang };
@@ -553,7 +1047,7 @@ ${messages.slice(0, 30).map(m => `${m.role.toUpperCase()}: ${m.content.slice(0, 
     });
     setActiveFilePath(path);
     toast("File in workspace", { description: path });
-  };
+  }, []);
 
   const updateActiveFileContent = (newContent: string) => {
     if (!activeFilePath) return;
@@ -611,72 +1105,15 @@ ${messages.slice(0, 30).map(m => `${m.role.toUpperCase()}: ${m.content.slice(0, 
     toast("Template loaded — Deep Plan mode engaged", { description: "AETHER will produce superior phased architecture first" });
   };
 
-  const refineFile = (file: WorkspaceFile) => {
+  const refineFile = useCallback((file: WorkspaceFile) => {
     const refinePrompt = `Please review and improve the following file with 2026 best practices, better error handling, security, performance and DX. Keep it complete and copy-paste ready.\n\nFILE: ${file.path}\n\n\`\`\`${file.lang}\n${file.content}\n\`\`\``;
     setInput(refinePrompt);
     setMode("review");
     setTimeout(() => sendMessage(), 30);
-  };
+  }, [sendMessage]);
 
-  const renderRichMessage = (msg: Message) => {
-    const content = msg.content;
-    const parts: React.ReactNode[] = [];
-    const codeRegex = /```([\w-]+)?(?::([^\n]+))?\n([\s\S]*?)```/g;
-    let last = 0;
-    let m: RegExpExecArray | null;
-    let key = 0;
-
-    while ((m = codeRegex.exec(content)) !== null) {
-      if (m.index > last) {
-        parts.push(<div key={key++} className="whitespace-pre-wrap text-[13px] leading-relaxed text-[#c9ccd3]">{content.slice(last, m.index)}</div>);
-      }
-      const lang = (m[1] || "text").trim();
-      const filePath = (m[2] || "").trim();
-      const code = m[3].trim();
-
-      parts.push(
-        <div key={key++} className="my-3 rounded-xl overflow-hidden border border-[#252932] bg-[#0d0f14]">
-          <div className="code-header flex items-center justify-between px-3 py-1.5 text-[#8b919d]">
-            <div className="flex items-center gap-2 font-mono text-[10px] tracking-[0.5px]">
-              {filePath || lang}
-            </div>
-            <div className="flex gap-1.5">
-              <button
-                onClick={() => copyToClipboard(code, "code")}
-                className="inline-flex items-center gap-1 rounded px-2 py-0.5 hover:bg-[#1f242d] transition text-[10px]"
-              >
-                <Copy size={12} /> COPY
-              </button>
-              {filePath && (
-                <button
-                  onClick={() => loadFileToWorkspace(filePath, code, lang)}
-                  className="inline-flex items-center gap-1 rounded px-2 py-0.5 hover:bg-[#1f242d] transition text-[10px] text-[#22d3ee]"
-                >
-                  <FolderTree size={12} /> TO WORKSPACE
-                </button>
-              )}
-              {filePath && (
-                <button
-                  onClick={() => refineFile({ path: filePath, content: code, lang })}
-                  className="inline-flex items-center gap-1 rounded px-2 py-0.5 hover:bg-[#1f242d] transition text-[10px] text-[#f472b6]"
-                >
-                  <RefreshCw size={12} /> REFINE
-                </button>
-              )}
-            </div>
-          </div>
-          <pre className="code-block p-4 text-[12.5px] leading-[1.45] overflow-auto text-[#c9d0dc]"><code>{code}</code></pre>
-        </div>
-      );
-      last = m.index + m[0].length;
-    }
-    if (last < content.length) {
-      parts.push(<div key={key++} className="whitespace-pre-wrap text-[13px] leading-relaxed text-[#c9ccd3]">{content.slice(last)}</div>);
-    }
-    return <div className="space-y-1 text-[13px]">{parts}</div>;
-  };
-
-  const currentConfigLabel = `${provider.toUpperCase()} • ${stack} • ${mode}${deepThink ? " • DEEP" : ""}`;
+  // Old renderRichMessage removed — logic lives in the top-level memoized RichMessage + MemoizedCodeBlock components.
+  // This eliminates repeated regex + element creation for every historical message on every parent re-render.
 
   // Auto-close side panels the first time we detect mobile for a clean phone-first experience
   // (user can still open them via header buttons; drawers will slide in)
@@ -700,301 +1137,315 @@ ${messages.slice(0, 30).map(m => `${m.role.toUpperCase()}: ${m.content.slice(0, 
       <div className="flex h-dvh lg:h-screen aether-container overflow-hidden text-sm touch-manipulation">
       {MobileDrawerBackdrop}
 
-      {/* LEFT — Command & Context (desktop column | mobile slide-in drawer) */}
-      <div
-        className={`
-          ${isMobile 
-            ? `fixed inset-y-0 left-0 z-50 w-[86%] max-w-[320px] border-r border-[#252932] bg-[#0a0b0f] flex flex-col overflow-hidden shadow-2xl
-               transition-transform duration-200 ease-out ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`
-            : `${sidebarOpen ? 'w-72' : 'w-0'} transition-all duration-200 border-r border-[#252932] bg-[#0a0b0f] flex flex-col overflow-hidden shrink-0`
-          }
-        `}
-      >
-        <div className="p-4 border-b border-[#252932] flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded bg-gradient-to-br from-[#6366f1] to-[#22d3ee] flex items-center justify-center text-[10px] font-bold tracking-[1px] text-black">AE</div>
-            <div>
-              <div className="font-semibold tracking-[-0.2px]">AETHER</div>
-              <div className="text-[10px] text-[#5f6674] -mt-0.5">2026 Systems Architect</div>
-            </div>
-          </div>
-          <div className="ml-auto text-[10px] px-2 py-px rounded bg-[#111318] border border-[#252932] text-[#8b919d]">v2</div>
-        </div>
-
-        <div className="p-4 space-y-4 border-b border-[#252932]">
-          <div>
-            <div className="uppercase text-[10px] tracking-[1px] text-[#5f6674] mb-1.5 flex items-center gap-1.5">
-              <Settings size={13} /> PROVIDER + MODEL
-            </div>
-            <div className="flex gap-1 flex-wrap">
-              {(["groq", "anthropic", "google"] as const).map((p) => (
-                <button
-                  key={p}
-                  onClick={() => setProvider(p)}
-                  className={`badge px-3 py-1 text-xs transition ${provider === p ? "badge-accent" : "hover:border-[#353a46]"}`}
-                >
-                  {p}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <div className="uppercase text-[10px] tracking-[1px] text-[#5f6674] mb-1.5">MODE (changes reasoning)</div>
-            <div className="grid grid-cols-2 gap-1">
-              {MODES.map((m) => {
-                const Icon = m.icon;
-                return (
-                  <button
-                    key={m.value}
-                    onClick={() => setMode(m.value)}
-                    className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-left transition ${mode === m.value ? "border-[#6366f1] bg-[#111318]" : "border-[#252932] hover:bg-[#111318]"}`}
-                  >
-                    <Icon size={15} className="shrink-0" />
-                    <div className="min-w-0">
-                      <div className="font-medium text-xs">{m.label}</div>
-                      <div className="text-[#5f6674] text-[10px] leading-none mt-px truncate">{m.desc}</div>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div>
-            <div className="uppercase text-[10px] tracking-[1px] text-[#5f6674] mb-1.5">STACK — ADVANCED TECH ONLY</div>
-            <select
-              value={stack}
-              onChange={(e) => setStack(e.target.value as Stack)}
-              className="w-full bg-[#111318] border border-[#252932] rounded-lg px-3 py-2 text-sm focus:border-[#6366f1] outline-none"
-            >
-              {STACKS.map((s) => (
-                <option key={s.value} value={s.value}>{s.label}</option>
-              ))}
-            </select>
-            <div className="text-[10px] text-[#5f6674] mt-1 pl-1">{STACKS.find((s) => s.value === stack)?.hint}</div>
-          </div>
-
-          <label className="flex items-center gap-2 cursor-pointer select-none pt-1">
-            <input
-              type="checkbox"
-              checked={deepThink}
-              onChange={(e) => setDeepThink(e.target.checked)}
-              className="accent-[#6366f1] scale-110"
-            />
-            <div>
-              <span className="font-medium">Deep Think + Self-Critique</span>
-              <div className="text-[#5f6674] text-xs leading-none">Second-pass reflection. Slower. Dramatically better.</div>
-            </div>
-          </label>
-        </div>
-
-        <div className="p-4 flex-1 overflow-auto space-y-2">
-          <div className="uppercase text-[10px] tracking-[1px] text-[#5f6674] mb-1">SMART START TEMPLATES</div>
-          {QUICK_TEMPLATES.map((t, i) => (
-            <button
-              key={i}
-              onClick={() => loadTemplate(t)}
-              className="w-full text-left text-xs p-2.5 rounded-lg border border-[#252932] hover:border-[#353a46] hover:bg-[#111318] transition line-clamp-2"
-            >
-              {t}
-            </button>
-          ))}
-
-          <div className="pt-3">
-            <button onClick={clearWorkspace} className="text-xs flex items-center gap-1.5 text-[#ef4444] hover:text-red-400">
-              <X size={13} /> Clear entire workspace &amp; plan
-            </button>
-          </div>
-        </div>
-
-        <div className="p-3 text-[10px] text-[#5f6674] border-t border-[#252932]">Built for production. Think deeper. Ship faster.</div>
-      </div>
-
-      {/* CENTER — Chat + Reasoning */}
+      {/* CENTER — Chat + Reasoning (full width, single clean top control bar) */}
       <div className="flex-1 flex flex-col min-w-0 border-r border-[#252932]">
-        <div className="h-12 shrink-0 border-b border-[#252932] bg-[#0a0b0f] flex items-center px-4 gap-3 justify-between">
-          <div className="flex items-center gap-2">
-            {/* Prominent hamburger for mobile - opens slide-out command drawer */}
-            {isMobile && (
-              <button
-                onClick={() => setSidebarDrawerOpen(true)}
-                className="p-2 -ml-1 rounded-lg hover:bg-[#111318] text-[#8b919d] active:bg-[#252932] min-h-[44px] min-w-[44px] flex items-center justify-center"
-                aria-label="Open controls drawer"
-              >
-                <Menu size={19} />
-              </button>
-            )}
-            {!isMobile && (
-              <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-1.5 rounded hover:bg-[#111318] text-[#8b919d]">
-                <Settings size={16} />
-              </button>
-            )}
-            <div className="flex items-center gap-2">
-              <div className="w-1.5 h-1.5 rounded-full bg-[#22c55e] animate-pulse" />
-              <div className="font-semibold tracking-[-0.1px] text-sm md:text-base">AETHER</div>
-              <div className="badge text-[#22d3ee] border-[#22d3ee]/30 hidden sm:inline text-[9px] md:text-[10px]">{currentConfigLabel}</div>
+        {/* ==================== SINGLE CLEAN TOP NAVIGATION BAR ==================== */}
+        {/* All controls (Provider, Mode, Stack, Deep Think) + Templates now live here in one clean modern nav bar */}
+        {/* This replaces the old left sidebar completely — chat area is now much larger */}
+        <div className="shrink-0 border-b border-[#252932] bg-[#0a0b0f]/95 backdrop-blur-md px-4 py-3">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-3 max-w-[1600px] mx-auto">
+            
+            {/* Built by attribution — inside the nav bar on the left, same row as Provider controls (stylish & subtle) */}
+            <div className="hidden md:flex items-center pr-4 mr-2 border-r border-[#252932] text-[10px] tracking-[0.8px] text-[#5f6674] font-light select-none whitespace-nowrap">
+              Built by <span className="ml-1 text-[#b8bdc7] font-medium tracking-[0.4px]">Abdullah Jan</span>
             </div>
-          </div>
 
-          <div className="flex items-center gap-1.5 text-xs">
-            {!isMobile && (
-              <button onClick={() => setShowThinking(!showThinking)} className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#111318] border border-[#252932] hover:border-[#353a46]">
-                <Brain size={13} /> {showThinking ? "Hide" : "Show"} Thinking
-              </button>
-            )}
-            <button
-              onClick={() => setWorkspaceOpen(!workspaceOpen)}
-              className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#111318] border border-[#252932] hover:border-[#353a46] min-h-[36px]"
-            >
-              <FolderTree size={13} /> <span className="hidden sm:inline">Workspace</span>
-              {workspaceSizeMB > 0.1 && <span className="text-[10px] text-[#5f6674] hidden md:inline">({workspaceSizeMB.toFixed(1)})</span>}
-            </button>
+            {/* PROVIDER — colorful visible Choice Selection */}
+            <MemoizedChoiceSelect
+              label="Provider"
+              value={provider}
+              onChange={(v) => setProvider(v)}
+              options={[
+                { value: "groq", label: "Groq" },
+                { value: "anthropic", label: "Anthropic" },
+                { value: "google", label: "Google" },
+              ]}
+            />
 
-            {/* Summarize long threads - layered enhancement for efficiency */}
-            {messages.length > 10 && (
+            {/* MODE — colorful visible Choice Selection */}
+            <MemoizedChoiceSelect
+              label="Mode"
+              value={mode}
+              onChange={(v) => setMode(v)}
+              options={MODES.map(m => ({ value: m.value, label: m.label }))}
+            />
+
+            {/* STACK — colorful visible Choice Selection + Deep Think toggle */}
+            <div className="flex items-center gap-4">
+              <MemoizedChoiceSelect
+                label="Stack"
+                value={stack}
+                onChange={(v) => setStack(v)}
+                options={STACKS.map(s => ({ value: s.value, label: s.label }))}
+              />
+
+              {/* Deep Think compact toggle (kept as nice switch) */}
+              <div onClick={() => setDeepThink(!deepThink)} className="flex items-center gap-2 cursor-pointer select-none text-xs">
+                <div className="text-[10px] uppercase tracking-[1.5px] text-[#5f6674] font-medium">Deep Think</div>
+                <div className={`relative w-9 h-5 rounded-full transition ${deepThink ? "bg-[#6366f1]" : "bg-[#252932]"}`}>
+                  <div className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${deepThink ? "translate-x-[15px]" : ""}`} />
+                </div>
+              </div>
+            </div>
+
+            {/* TEMPLATES — colorful visible Choice Selection (action style) */}
+            <MemoizedChoiceSelect
+              label="Templates"
+              value=""
+              onChange={(fullTemplate) => loadTemplate(fullTemplate)}
+              options={[
+                { value: QUICK_TEMPLATES[0], label: "SaaS Dashboard" },
+                { value: QUICK_TEMPLATES[1], label: "Flutter E-com" },
+                { value: QUICK_TEMPLATES[2], label: "FastAPI Backend" },
+                { value: QUICK_TEMPLATES[3], label: "Go Microservice" },
+                { value: QUICK_TEMPLATES[4], label: "Polyglot Stack" },
+              ]}
+              placeholder="Select template..."
+            />
+
+            {/* Right side actions — only instance now (old thin header + duplicate buttons fully removed) */}
+            <div className="flex items-center gap-1.5 ml-auto pl-3 border-l border-[#252932]">
+              {!isMobile && (
+                <button
+                  onClick={() => setShowThinking(!showThinking)}
+                  className="px-2.5 py-1 rounded-xl bg-[#111318] border border-[#252932] hover:border-[#353a46] text-xs transition active:scale-[0.985]"
+                >
+                  <Brain size={13} className="inline mr-1" />
+                  {showThinking ? "Hide" : "Show"} Thinking
+                </button>
+              )}
               <button
-                onClick={handleSummarizeThread}
-                disabled={loading}
-                className="flex items-center gap-1 px-2 py-1 rounded bg-[#111318] border border-[#252932] hover:border-[#353a46] disabled:opacity-50 min-h-[36px]"
-                title="Generate concise running summary (keeps long context lean)"
+                onClick={() => setWorkspaceOpen(!workspaceOpen)}
+                className="px-2.5 py-1 rounded-xl bg-[#111318] border border-[#252932] hover:border-[#353a46] text-xs transition active:scale-[0.985]"
               >
-                <Brain size={13} /> <span className="hidden md:inline">Summarize</span>
+                <FolderTree size={13} className="inline mr-1" />
+                Workspace
               </button>
-            )}
+              {messages.length > 10 && (
+                <button
+                  onClick={handleSummarizeThread}
+                  disabled={loading}
+                  className="px-2.5 py-1 rounded-xl bg-[#111318] border border-[#252932] hover:border-[#353a46] text-xs transition active:scale-[0.985] disabled:opacity-50"
+                >
+                  <Brain size={13} className="inline mr-1" />
+                  Summarize
+                </button>
+              )}
+            </div>
+
           </div>
         </div>
+        {/* ==================== END TOP NAV ==================== */}
 
-        <div className="flex-1 overflow-y-auto px-5 py-6 space-y-6 bg-[#0a0b0f]">
-          {messages.map((msg, idx) => (
-            <div key={idx} className={`flex gap-3 ${msg.role === "user" ? "justify-end" : ""}`}>
-              {msg.role === "assistant" && (
-                <div className="w-7 h-7 mt-0.5 rounded-md bg-gradient-to-br from-[#6366f1] to-[#22d3ee] text-[10px] font-bold flex items-center justify-center text-black shrink-0">A</div>
-              )}
+        {/* The chat viewport now has paint containment + its own stacking context.
+            Combined with the portaled dropdowns, clicking anything in the nav bar should no longer
+            cause visible blinking/repaint flashes on the golden watermark background.
+            We also attach chatScrollerRef here so we can do cheap instant scrollTop=scrollHeight
+            during streaming (the only way to kill the "up and down" bounce while tokens arrive). */}
+        <div ref={chatScrollerRef} className="flex-1 overflow-y-auto px-5 py-6 bg-[#0a0b0f] relative [contain:paint] [isolation:isolate]">
+          {/* ===== GOLDEN WATERMARK (background of chat area) ===== */}
+          {/* Heavily optimized:
+              - Much smaller font caps (110px was a massive paint/composite cost).
+              - Own compositing layer (translateZ + will-change + backface-visibility).
+              - content-visibility: auto so the browser can skip work when it's offscreen or during heavy updates.
+              - Memoized via a tiny component below so parent re-renders (streaming tokens etc.) don't even consider this subtree.
+              This used to be one of the biggest sources of "loading lag / jank" because the giant rotated gradient text was being considered on every state update in the chat tree. */}
+          <Watermark />
 
-              <div className={`max-w-[82%] rounded-2xl px-4 py-3.5 text-[13px] ${msg.role === "user" ? "message-user rounded-br-md" : "message-assistant rounded-bl-md"}`}>
-                {msg.role === "assistant" ? (
-                  <>
-                    {renderRichMessage(msg)}
+          {/* All chat content (messages + thinking loader) lives above the watermark.
+              overflowAnchor:none tells the browser not to try to "helpfully" keep scroll position anchored
+              to some element while the live response is growing — another source of up/down jitter. */}
+          <div className="relative z-10 space-y-6" style={{ overflowAnchor: 'none' as any }}>
+            {/* Historical messages — these are now 100% stable during a generation.
+                They only change when a full turn is committed (after streaming finishes).
+                Wrapped in memoized ChatMessage + RichMessage so that input typing, nav toggles, plan checkbox clicks elsewhere,
+                or other parent state changes cause almost zero work for past turns. This is critical for perceived smoothness. */}
+            {messages.map((msg, idx) => (
+              <ChatMessage
+                key={idx}
+                msg={msg}
+                idx={idx}
+                showThinking={showThinking}
+                planSteps={planSteps}
+                onTogglePlanStep={togglePlanStep}
+                onCopy={copyToClipboard}
+                onToWorkspace={loadFileToWorkspace}
+                onRefine={refineFile}
+              />
+            ))}
+          </div> {/* close the historical messages space-y-6 wrapper */}
 
-                    {showThinking && msg.thinking && (
-                      <details className="thinking-block mt-4 pl-3 pr-2 py-2 rounded text-xs text-[#a1a6b0] cursor-pointer" open>
-                        <summary className="font-medium text-[#6366f1] select-none">AETHER Thinking (first principles + critique)</summary>
-                        <div className="mt-2 whitespace-pre-wrap leading-relaxed">{msg.thinking}</div>
-                      </details>
-                    )}
+          {/* LIVE STREAMING BUBBLE — rendered OUTSIDE the historical space-y-6.
+              This + the always-present status row + instant (non-smooth) bottom pinning is the final fix for
+              "loading ke waqt aik hi jagha up and down ho raha ha".
 
-                    {msg.plan && (
-                      <div className="mt-4 border border-[#252932] rounded-xl p-3 bg-[#0a0b0f]">
-                        <div className="uppercase tracking-widest text-[10px] text-[#6366f1] mb-2">EXECUTION PLAN — check progress</div>
-                        {planSteps.length > 0 ? (
-                          <div className="space-y-1.5">
-                            {planSteps.map((step) => (
-                              <label key={step.id} className={`plan-step flex items-start gap-2 text-xs cursor-pointer ${step.completed ? "completed" : ""}`}>
-                                <input type="checkbox" checked={step.completed} onChange={() => togglePlanStep(step.id)} className="mt-0.5 accent-[#6366f1]" />
-                                <span>{step.text}</span>
-                              </label>
-                            ))}
-                          </div>
-                        ) : (
-                          <div className="text-[#8b919d] text-xs whitespace-pre-wrap">{msg.plan}</div>
-                        )}
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <div className="whitespace-pre-wrap">{msg.content}</div>
-                )}
-              </div>
-
-              {msg.role === "user" && (
-                <div className="w-7 h-7 mt-0.5 rounded-md bg-[#252932] text-[10px] font-bold flex items-center justify-center shrink-0">ME</div>
-              )}
-            </div>
-          ))}
-
-          <AnimatePresence>
-            {loading && (
-              <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="flex gap-3 items-center">
+              Key stabilizations:
+              - mt-6 explicit instead of participating in space-y (prevents sibling spacing recalcs on growth).
+              - Status row is ALWAYS mounted the moment the live bubble appears (no sudden +height jump when the first tokens arrive).
+              - Top text area has min-h so first paint footprint is close to final.
+              - The text uses break-words + the panel has min-w-0 for proper flex containment.
+              - During streaming the parent effect does direct scrollTop (no smooth animation). */}
+          {(loading || streamingContent) && (
+            <div className="relative z-10 mt-6">
+              <div className="flex gap-3 items-start">
                 <div className="w-7 h-7 rounded-md bg-gradient-to-br from-[#6366f1] to-[#22d3ee] flex items-center justify-center text-black text-[10px] font-bold shrink-0 mt-0.5">A</div>
-                <div className="panel-elev rounded-2xl px-4 py-3.5 max-w-[70%] flex-1">
-                  <div className="flex items-center gap-2 text-[#8b919d] text-xs">
+
+                <div className="panel-elev rounded-2xl px-4 py-3.5 max-w-[82%] flex-1 min-w-0">
+                  {/* Accumulating response (plain + fast during stream).
+                      min-h keeps the box from collapsing on the very first paint and reduces reflow when we switch from "thinking" to real text. */}
+                  <div className="min-h-[20px] whitespace-pre-wrap text-[13px] leading-relaxed text-[#c9ccd3] break-words">
+                    {streamingContent ? (
+                      <>
+                        {streamingContent}
+                        {/* subtle streaming caret */}
+                        <span className="inline-block w-[2px] h-[1.1em] align-[-0.15em] ml-0.5 bg-[#22d3ee] animate-pulse" />
+                      </>
+                    ) : (
+                      "AETHER is thinking…"
+                    )}
+                  </div>
+
+                  {/* Status row is ALWAYS present while the live bubble exists.
+                      This is the #1 layout-shift killer: previously the mt-3 bar appeared after the first tokens,
+                      causing the whole bottom area (and thus scroll position) to jump "up and down". */}
+                  <div className="mt-3 flex items-center gap-2 text-[#8b919d] text-xs border-t border-white/10 pt-2.5">
                     <div className="flex gap-1">
                       <div className="w-1 h-1 bg-[#6366f1] rounded-full animate-bounce" />
                       <div className="w-1 h-1 bg-[#6366f1] rounded-full animate-bounce" style={{ animationDelay: "120ms" }} />
                       <div className="w-1 h-1 bg-[#6366f1] rounded-full animate-bounce" style={{ animationDelay: "240ms" }} />
                     </div>
-                    <span className="flex-1">
-                      AETHER is reasoning — {mode === "plan" ? "architecting phases" : mode === "debug" ? "isolating root cause" : deepThink ? "deep critique pass" : "generating production artifacts"}
-                    </span>
+                    <span className="flex-1 truncate">{liveStatus}</span>
                     <button
                       onClick={cancelCurrentRequest}
-                      className="ml-3 text-[10px] px-2 py-0.5 rounded bg-[#252932] hover:bg-[#ef4444] hover:text-white transition"
+                      className="ml-2 text-[10px] px-2 py-0.5 rounded bg-[#252932] hover:bg-[#ef4444] hover:text-white active:scale-[0.985] transition"
                     >
                       CANCEL
                     </button>
                   </div>
                 </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+              </div>
+            </div>
+          )}
 
           <div ref={bottomRef} />
-        </div>
+        </div> {/* chat viewport */}
 
         {attachedFiles.length > 0 && (
           <div className="px-4 pb-2 flex flex-wrap gap-2">
             {attachedFiles.map((af) => (
-              <div key={af.name} className="inline-flex items-center gap-1.5 text-xs bg-[#111318] border border-[#252932] pl-2.5 pr-1 py-1 rounded-full">
+              <div key={af.name} className="inline-flex items-center gap-1.5 text-xs bg-[#111318] border border-[#252932] pl-2.5 pr-1 py-1 rounded-full hover:border-[#353a46]">
                 📎 {af.name}
-                <button onClick={() => removeAttached(af.name)} className="text-[#5f6674] hover:text-[#ef4444] px-1"><X size={13} /></button>
+                <button onClick={() => removeAttached(af.name)} className="text-[#5f6674] hover:text-[#ef4444] px-1 transition"><X size={13} /></button>
               </div>
             ))}
           </div>
         )}
 
+        {/* ==================== ADVANCED MODERN COMMAND BAR ==================== */}
+        {/* 2026 premium AI input — deep layered depth, sophisticated color accents, unified focus glow */}
         <div className="shrink-0 border-t border-[#252932] bg-[#0a0b0f] p-4">
-          <div className="flex gap-2 items-end max-w-4xl">
+          <div className="flex items-center gap-3 max-w-4xl mx-auto">
             <input
               ref={fileInputRef}
               type="file"
               className="hidden"
               onChange={handleAttach}
-              accept=".txt,.md,.ts,.tsx,.js,.jsx,.json,.css,.html,.py,.dart,.go,.rs,.yml,.yaml,.prisma,.sql,.env*"
             />
 
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="p-3 rounded-2xl bg-[#111318] border border-[#252932] hover:border-[#353a46] text-[#8b919d] hover:text-white transition shrink-0"
-              title="Attach source, logs, schemas, pubspec, etc. (actual content sent for context)"
-            >
-              <Paperclip size={17} />
-            </button>
+            {/* ==================== ADVANCED TECH ATTACH CONTROL ==================== */}
+            {/* High-tech squircle control with layered depth, cyan holo ring, active state */}
+            <div className="relative" ref={attachMenuRef}>
+              <button
+                onClick={() => setShowAttachMenu(!showAttachMenu)}
+                className={`group relative flex h-[56px] w-12 items-center justify-center rounded-[18px] border transition-all duration-200 active:scale-[0.94] focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0b0f] shrink-0
+                  ${showAttachMenu 
+                    ? 'border-[#22d3ee] bg-[#0c0e14] text-[#22d3ee] shadow-[0_0_0_1px_#22d3ee,0_4px_16px_-4px_rgba(34,211,238,0.3)]' 
+                    : 'border-[#252932] bg-[#0c0e14] text-[#8b919d] hover:border-[#22d3ee]/50 hover:text-[#22d3ee] hover:shadow-[0_0_0_1px_rgba(34,211,238,0.15)]'}`}
+                title="Add file — Photo (images) or Document (any code, text, PDF, logs...)"
+                aria-haspopup="menu"
+                aria-expanded={showAttachMenu}
+              >
+                {/* Outer tech ring (subtle always, stronger on hover/active) */}
+                <div className="absolute inset-0 rounded-[14px] ring-1 ring-inset ring-white/5 group-hover:ring-[#22d3ee]/20 transition" />
+                {/* Inner bevel for premium machined look */}
+                <div className="absolute inset-[1.5px] rounded-[11px] border border-white/[0.035] pointer-events-none" />
+                <Paperclip size={17} className="relative z-10 transition-transform duration-200 group-hover:-rotate-12" />
+              </button>
 
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Describe goal, paste error + stack, or ask for a full production Flutter + backend system..."
-              className="input-modern flex-1 rounded-2xl px-4 py-3.5 min-h-[52px] max-h-40 resize-y text-[13.5px] placeholder:text-[#5f6674]"
-              rows={1}
-            />
+              {/* Advanced Photo / Doc menu — tech menu style */}
+              {showAttachMenu && (
+                <div
+                  className="absolute bottom-full left-0 mb-2 z-[80] min-w-[182px] overflow-hidden rounded-2xl border border-[#252932] bg-[#0b0d14] shadow-[0_12px_48px_-12px_rgb(0,0,0,0.65)] py-1"
+                  role="menu"
+                >
+                  <button
+                    onClick={() => openAttachPicker(PHOTO_ACCEPT)}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-left hover:bg-white/[0.022] active:bg-white/[0.04] text-[#c9ccd3] hover:text-white transition group"
+                    role="menuitem"
+                  >
+                    <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#22d3ee]/10 text-[#22d3ee] ring-1 ring-inset ring-[#22d3ee]/20 group-hover:ring-[#22d3ee]/40 transition">
+                      <Image size={15} />
+                    </div>
+                    <div className="leading-tight">
+                      <div className="font-medium tracking-[-0.1px]">Photo / Image</div>
+                      <div className="text-[10px] text-[#5f6674] -mt-px">All images • PNG, JPG, HEIC, WebP, SVG…</div>
+                    </div>
+                  </button>
 
+                  <div className="mx-3 my-px h-px bg-white/10" />
+
+                  <button
+                    onClick={() => openAttachPicker(DOC_ACCEPT)}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-left hover:bg-white/[0.022] active:bg-white/[0.04] text-[#c9ccd3] hover:text-white transition group"
+                    role="menuitem"
+                  >
+                    <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#6366f1]/10 text-[#6366f1] ring-1 ring-inset ring-[#6366f1]/20 group-hover:ring-[#6366f1]/40 transition">
+                      <FileText size={15} />
+                    </div>
+                    <div className="leading-tight">
+                      <div className="font-medium tracking-[-0.1px]">Document / Code / File</div>
+                      <div className="text-[10px] text-[#5f6674] -mt-px">PDF, MD, JSON, source, logs, archives…</div>
+                    </div>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* ==================== ADVANCED TECH INPUT SHELL ==================== */}
+            {/* Command-line style capsule with left tech accent strip + premium multi-layer focus glow.
+               Height matched to the attach + SEND buttons for perfect row alignment. */}
+            <div className="group/input flex-1">
+              {/* Thin gradient border wrapper for high-tech frame */}
+              <div className="rounded-[28px] p-[1px] min-h-[56px] bg-gradient-to-r from-[#6366f1]/70 via-[#22d3ee]/50 to-[#6366f1]/70 transition-all duration-200 group-focus-within/input:from-[#8183f3] group-focus-within/input:via-[#67e8f9] group-focus-within/input:to-[#8183f3]">
+                <div className="flex items-center rounded-[26px] bg-[#0a0c13] border border-white/[0.035] pl-1 pr-2 py-1.5 transition-all duration-200 group-focus-within/input:border-white/5 group-focus-within/input:shadow-[0_0_0_7px_rgba(99,102,241,0.07),0_0_0_2px_#22d3ee,0_0_0_1px_#6366f1] min-h-[54px]">
+                  
+                  {/* Left tech accent strip — always visible, glows on focus (very "AI terminal" / modern agent) */}
+                  <div className="ml-1.5 mr-1.5 flex h-7 w-[3px] self-center rounded-full bg-gradient-to-b from-[#6366f1] via-[#22d3ee] to-[#6366f1] opacity-70 group-focus-within/input:opacity-100 transition" />
+
+                  <textarea
+                    ref={textareaRef}
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="Describe goal, paste error + stack, or ask for a full production Flutter + backend system..."
+                    className="flex-1 bg-transparent px-3 py-2.5 min-h-[44px] max-h-40 resize-y text-[14.5px] placeholder:text-[#5f6674] text-[#e6e9f2] focus:outline-none leading-[1.35] tracking-[-0.1px]"
+                    rows={1}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Ultra-premium SEND — rich multi-stop gradient, strong depth, luxurious hover */}
             <button
               onClick={sendMessage}
               disabled={loading || (!input.trim() && !attachedFiles.length)}
-              className="bg-[#6366f1] hover:bg-[#5558e0] disabled:bg-[#252932] disabled:text-[#5f6674] transition text-white px-6 h-[52px] rounded-2xl flex items-center gap-2 text-sm font-medium shrink-0 active:scale-[0.985]"
+              className="group relative h-[56px] rounded-[22px] px-8 flex items-center gap-2.5 text-sm font-semibold tracking-[0.8px] text-black active:scale-[0.985] transition-all duration-150 disabled:text-[#5f6674] disabled:bg-[#252932] disabled:shadow-none shadow-[0_6px_24px_-6px_rgba(99,102,241,0.5)] overflow-hidden bg-[linear-gradient(135deg,#6366f1_0%,#8183f3_45%,#22d3ee_100%)] hover:bg-[linear-gradient(135deg,#8183f3_0%,#67e8f9_45%,#67e8f9_100%)]"
             >
-              <Send size={16} /> SEND
+              {/* delicate top rim light for 3D premium feel */}
+              <div className="absolute inset-x-0 top-0 h-px bg-white/40" />
+              <Send size={18} className="relative z-10 -ml-0.5 group-enabled:group-hover:-translate-y-[1px] group-enabled:group-hover:translate-x-[1px] transition-transform" />
+              <span className="relative z-10 font-semibold">SEND</span>
             </button>
-          </div>
-          <div className="text-[10px] text-[#5f6674] pl-1 mt-1.5 flex gap-3">
-            <span>Shift+Enter for newline</span>
-            <span>•</span>
-            <span>Deep Think + plan mode = best long-term results</span>
-            <span>•</span>
-            <span>Attach real files for god-tier bug fixing</span>
           </div>
         </div>
       </div>
@@ -1099,44 +1550,60 @@ ${messages.slice(0, 30).map(m => `${m.role.toUpperCase()}: ${m.content.slice(0, 
               <button onClick={() => setSidebarDrawerOpen(false)} className="p-2 -mr-1"><X size={18} /></button>
             </div>
             <div className="overflow-auto flex-1 text-sm">
-              {/* Re-render compact version of command content for the drawer */}
+              {/* Compact modern drawer version */}
               <div className="p-3 border-b border-[#252932]">
-                <div className="uppercase text-[10px] tracking-[1px] text-[#5f6674] mb-1.5">PROVIDER</div>
-                <div className="flex gap-1 flex-wrap">
-                  {(["groq","anthropic","google"] as const).map(p => (
-                    <button key={p} onClick={() => {setProvider(p); setSidebarDrawerOpen(false);}} className={`badge px-2.5 py-0.5 text-xs ${provider===p ? 'badge-accent':''}`}>{p}</button>
-                  ))}
+                <div className="uppercase text-[10px] tracking-[2px] text-[#5f6674] mb-2">PROVIDER</div>
+                <div className="flex gap-1.5 flex-wrap">
+                  {(["groq","anthropic","google"] as const).map(p => {
+                    const active = provider === p;
+                    return (
+                      <button 
+                        key={p} 
+                        onClick={() => {setProvider(p); setSidebarDrawerOpen(false);}} 
+                        className={`px-3 py-1 rounded-full text-xs font-medium border transition ${active ? "bg-[#6366f1] text-white border-[#6366f1]" : "border-[#252932] text-[#c9ccd3]"}`}
+                      >
+                        {p}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
+
               <div className="p-3">
-                <div className="uppercase text-[10px] tracking-[1px] text-[#5f6674] mb-1">MODE</div>
-                <div className="grid grid-cols-2 gap-1 text-xs">
-                  {MODES.map(m => (
-                    <button key={m.value} onClick={() => {setMode(m.value); setSidebarDrawerOpen(false);}} className={`flex gap-1.5 items-center rounded border px-2 py-1.5 ${mode===m.value ? 'border-[#6366f1] bg-[#111318]' : 'border-[#252932]'}`}>
-                      <m.icon size={14} /> {m.label}
-                    </button>
-                  ))}
+                <div className="uppercase text-[10px] tracking-[2px] text-[#5f6674] mb-2">MODE</div>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  {MODES.map(m => {
+                    const active = mode === m.value;
+                    return (
+                      <button 
+                        key={m.value} 
+                        onClick={() => {setMode(m.value); setSidebarDrawerOpen(false);}} 
+                        className={`flex items-center gap-2 rounded-xl border px-2.5 py-2 text-left ${active ? "border-[#6366f1] bg-[#111318]" : "border-[#252932]"}`}
+                      >
+                        <m.icon size={14} /> {m.label}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
+
               <div className="p-3 border-t border-[#252932] text-xs">
-                <div className="uppercase tracking-widest text-[#5f6674] mb-1">STACK</div>
-                <select value={stack} onChange={e=>setStack(e.target.value as any)} className="w-full bg-[#111318] border border-[#252932] rounded px-2 py-1">
+                <div className="uppercase tracking-[2px] text-[#5f6674] mb-1.5">STACK</div>
+                <select value={stack} onChange={e=>setStack(e.target.value as any)} className="w-full bg-[#111318] border border-[#252932] rounded-xl px-3 py-2">
                   {STACKS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
                 </select>
               </div>
+
               <div className="p-3 border-t border-[#252932]">
-                <label className="flex gap-2 items-center text-xs">
-                  <input type="checkbox" checked={deepThink} onChange={e=>setDeepThink(e.target.checked)} className="accent-[#6366f1]" />
-                  Deep Think (better but slower)
-                </label>
+                <div onClick={() => setDeepThink(!deepThink)} className="flex items-center justify-between cursor-pointer text-xs">
+                  <span>Deep Think + Self-Critique</span>
+                  <div className={`relative w-9 h-5 rounded-full transition ${deepThink ? "bg-[#6366f1]" : "bg-[#252932]"}`}>
+                    <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${deepThink ? "translate-x-[17px]" : "translate-x-0.5"}`} />
+                  </div>
+                </div>
               </div>
-              <div className="p-3 text-xs border-t border-[#252932]">
-                <div className="uppercase text-[#5f6674] mb-1">TEMPLATES</div>
-                {QUICK_TEMPLATES.slice(0,3).map((t,i) => (
-                  <button key={i} onClick={() => {loadTemplate(t); setSidebarDrawerOpen(false);}} className="block w-full text-left py-1 text-[#8b919d] hover:text-white truncate">{t}</button>
-                ))}
-                <button onClick={clearWorkspace} className="mt-2 text-[#ef4444] text-xs">Clear workspace</button>
-              </div>
+
+              {/* Templates section removed from drawer as well for clean sidebar */}
             </div>
           </motion.div>
         </>
